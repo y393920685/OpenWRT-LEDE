@@ -1,0 +1,149 @@
+#
+# <https://github.com/KFERMercer/OpenWrt-CI>
+#
+# Copyright (C) 2019 P3TERX
+#
+# Copyright (C) 2020 KFERMercer
+#
+
+name: OpenWRT-R4S  #设备名请用大写字母
+
+on:
+  schedule:
+    - cron: 0 22 */2 * *
+
+  workflow_dispatch:
+
+env:
+  DEVICE_NAME: R4S  #设备名请用大写字母
+  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+  INSTALL_LIST: https://raw.githubusercontent.com/VIKINGYFY/OpenWRT-LEDE/main/Install_List.txt
+  LEDE_URL: https://github.com/coolsnowwolf/lede.git
+  CORE_VER: https://raw.githubusercontent.com/vernesong/OpenClash/core/dev/core_version
+  CORE_TUN: https://github.com/vernesong/OpenClash/raw/core/dev/premium/clash-linux-arm64
+  CORE_DEV: https://github.com/vernesong/OpenClash/raw/core/dev/dev/clash-linux-arm64.tar.gz
+  CORE_MATE: https://github.com/vernesong/OpenClash/raw/core/dev/meta/clash-linux-arm64.tar.gz
+
+permissions: write-all
+
+jobs:
+  build_openwrt:
+    name: Build Firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi `docker images -q`
+          sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android
+          sudo -E apt -yqq update
+          sudo -E apt -yqq full-upgrade
+          sudo -E apt -yqq install $(curl -fsL $INSTALL_LIST)
+          sudo -E apt -yqq autoremove --purge
+          sudo -E apt -yqq clean
+          sudo -E apt -yqq autoclean
+          sudo -E systemctl daemon-reload
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Checkout OpenWRT
+        uses: actions/checkout@v3
+
+      - name: Clone LEDE Code
+        run: |
+          git clone --depth=1 --single-branch $LEDE_URL
+
+      - name: Update Scripts
+        run: |
+          cd ./Update
+          chmod +x *.sh
+          dos2unix *.sh
+
+      - name: Update Plugins
+        run: |
+          cd ./lede/package
+
+          #单独更新某个插件
+          $GITHUB_WORKSPACE/Update/Plugins.sh
+
+      - name: Update Feeds
+        run: |
+          cd ./lede
+
+          #添加第三方软件源
+          #$GITHUB_WORKSPACE/Update/Feeds.sh
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Update Settings
+        run: |
+          cd ./lede
+
+          #更新默认设置
+          $GITHUB_WORKSPACE/Update/Settings.sh
+
+      - name: Custom Settings
+        run: |
+          cd ./lede
+
+          rm -rf ./tmp && rm -rf ./.config*
+          cat "$GITHUB_WORKSPACE/Config/$DEVICE_NAME" "$GITHUB_WORKSPACE/Config/General" >> .config
+
+          make defconfig
+
+      - name: Download Packages
+        run: |
+          cd ./lede
+
+          make download -j16
+
+      - name: Compile Firmware
+        run: |
+          cd ./lede
+
+          make -j$(nproc) || make -j1 V=s
+
+          echo "======================="
+          df -h
+          echo "======================="
+          du -h --max-depth=1 ./build_dir
+          echo "======================="
+          du -h --max-depth=1 ./bin
+          echo "======================="
+
+      - name: Package Firmware
+        run: |
+          export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
+
+          cd ./lede
+          rm -rf $(find ./bin/targets/ -type f -iname "*.manifest" -or -type d -iname "packages")
+          cp -rf $(find ./bin/targets/ -type f -iname "*$DEVICE_NAME*.*") ./bin/targets/
+          cp -rf ./.config ./bin/targets/config.txt
+
+          cd ./bin/targets
+          zip -pmq "$DEVICE_NAME"_Firmware_"$BUILD_DATE".zip *.*
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{env.DEVICE_NAME}}_Firmware_${{env.BUILD_DATE}}
+          files: ./lede/bin/targets/*.zip
+          body: |
+            不要问，更就完事了！
+            地址：192.168.2.1
+            密码：password
+
+      - name: Delete Old Releases
+        uses: dev-drprasad/delete-older-releases@v0.2.1
+        with:
+          keep_latest: 3
+          delete_tags: true
+
+      - name: Delete Old Workflows
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
